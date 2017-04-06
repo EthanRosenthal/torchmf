@@ -172,7 +172,8 @@ class BasePipeline:
                  optimizer=torch.optim.Adam,
                  loss_function=nn.MSELoss(size_average=False),
                  n_epochs=10,
-                 verbose=False):
+                 verbose=False,
+                 random_seed=None):
         self.train_interactions = Interactions(train_data,
                                                test_data=test_data,
                                                train=True)
@@ -207,6 +208,9 @@ class BasePipeline:
         self.warm_start = False
         self.losses = collections.defaultdict(list)
         self.verbose = verbose
+        if random_seed is not None:
+            torch.manual_seed(random_seed)
+            np.random.seed(random_seed)
 
     def fit(self):
         for epoch in range(self.n_epochs):

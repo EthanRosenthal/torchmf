@@ -24,6 +24,6 @@ if __name__ == '__main__':
     pipeline = BasePipeline(train, test_data=test, model=BaseModule,
                             n_factors=10, batch_size=1024, dropout_p=0.02,
                             lr=0.02, weight_decay=0.1,
-                            optimizer=torch.optim.Adam, n_epochs=20,
-                            verbose=True)
+                            optimizer=torch.optim.Adam, n_epochs=10,
+                            verbose=True, random_seed=2017)
     pipeline.fit()
