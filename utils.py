@@ -1,5 +1,6 @@
 import os
 import requests
+import numpy as np
 import pandas as pd
 import zipfile
 
@@ -7,6 +8,35 @@ import zipfile
 Shamelessly stolen from
 https://github.com/maciejkula/triplet_recommendations_keras
 """
+
+
+def train_test_split(interactions, n=10):
+    """
+    Split an interactions matrix into training and test sets.
+    Parameters
+    ----------
+    interactions : np.ndarray
+    n : int (default=10)
+        Number of items to select / row to place into test.
+
+    Returns
+    -------
+    train : np.ndarray
+    test : np.ndarray
+    """
+    test = np.zeros(interactions.shape)
+    train = interactions.copy()
+    for user in range(interactions.shape[0]):
+        test_interactions = np.random.choice(interactions[user, :].nonzero()[0],
+                                             size=n,
+                                             replace=False)
+        train[user, test_interactions] = 0.
+        test[user, test_interactions] = interactions[user, test_interactions]
+
+    # Test and training are truly disjoint
+    assert(np.all((train * test) == 0))
+    return train, test
+
 
 def _get_data_path():
     """
@@ -36,6 +66,7 @@ def _download_movielens(dest_path):
 
     with zipfile.ZipFile(os.path.join(dest_path, 'ml-100k.zip'), 'r') as z:
         z.extractall(dest_path)
+
 
 def read_movielens_df():
     path = _get_data_path()
