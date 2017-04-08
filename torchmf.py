@@ -328,7 +328,10 @@ class BasePipeline:
     def _fit_epoch(self, epoch=1):
         self.model.train()
         total_loss = torch.Tensor([0])
-        for batch_idx, ((row, col), val) in tqdm(enumerate(self.train_loader)):
+        pbar = tqdm(enumerate(self.train_loader),
+                    total=len(self.train_loader),
+                    desc='({0:^3})'.format(epoch))
+        for batch_idx, ((row, col), val) in pbar:
             row = Variable(row)
             col = Variable(col)
             val = Variable(val)
@@ -338,6 +341,8 @@ class BasePipeline:
             loss.backward()
             self.optimizer.step()
             total_loss += loss.data[0]
+            batch_loss = loss.data[0] / row.size()[0]
+            pbar.set_postfix(train_loss=batch_loss)
         total_loss /= len(self.train_interactions)
         return total_loss[0]
 
@@ -378,7 +383,7 @@ class BPRPipeline(BasePipeline):
         total_loss = torch.Tensor([0])
         pbar = tqdm(enumerate(self.train_loader),
                     total=len(self.train_loader),
-                    desc='Epoch: {}'.format(epoch))
+                    desc='({0:^3})'.format(epoch))
         for batch_idx, ((row, pos_col, neg_col), val) in pbar:
             row = Variable(row)
             pos_col = Variable(pos_col)
