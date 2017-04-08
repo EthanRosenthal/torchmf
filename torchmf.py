@@ -1,4 +1,5 @@
 import collections
+import os
 
 import numpy as np
 import torch
@@ -50,6 +51,82 @@ class Interactions(data.Dataset):
             return self.train_data.nnz
         else:
             return self.test_data.nnz
+
+
+class PairwiseInteractions(data.Dataset):
+    """
+    Sample data from an interactions matrix in a pairwise fashion. The row is
+    treated as the main dimension, and the columns are sampled pairwise.
+    """
+
+    def __init__(self, train_data, test_data=None, train=True):
+        self.train = train
+        self.train_data = train_data.tocoo()
+        self.test_data = test_data.tocoo()
+        self.n_users = self.train_data.shape[0]
+        self.n_items = self.train_data.shape[1]
+
+        self.train_row = torch.from_numpy(self.train_data.row.astype(np.long))
+        self.train_col = torch.from_numpy(self.train_data.col.astype(np.long))
+        self.train_val = torch.from_numpy(self.train_data.data.astype(np.float32))
+
+        train_csr = train_data.tocsr()
+        if not train_csr.has_sorted_indices:
+            train_csr.sort_indices()
+        self.train_indptr = train_csr.indptr
+        self.train_indices = train_csr.indices
+
+        self.test_row = torch.from_numpy(self.test_data.row.astype(np.long))
+        self.test_col = torch.from_numpy(self.test_data.col.astype(np.long))
+        self.test_val = torch.from_numpy(self.test_data.data.astype(np.float32))
+
+        test_csr = test_data.tocsr()
+        if not test_csr.has_sorted_indices:
+            test_csr.sort_indices()
+        self.test_indptr = test_csr.indptr
+        self.test_indices = test_csr.indices
+
+    def __getitem__(self, index):
+        if self.train:
+            row = self.train_row[index]
+            found = False
+            while not found:
+                neg_col = np.random.randint(self.n_items)
+                if self.not_rated(row, neg_col, self.train_indptr,
+                                  self.train_indices):
+                    found = True
+
+            pos_col = self.train_col[index]
+            val = self.train_val[index]
+        else:
+            row = self.test_row[index]
+            found = False
+            while not found:
+                neg_col = np.random.randint(self.n_items)
+                if self.not_rated(row, neg_col, self.test_indptr,
+                                  self.test_indices):
+                    found = True
+
+            pos_col = self.test_col[index]
+            val = self.test_val[index]
+
+        return (row, pos_col, neg_col), val
+
+    def __len__(self):
+        if self.train:
+            return self.train_data.nnz
+        else:
+            return self.test_data.nnz
+
+    @staticmethod
+    def not_rated(row, col, indptr, indices):
+        # similar to use of bsearch in lightfm
+        start = indptr[row]
+        end = indptr[row + 1]
+        searched = np.searchsorted(indices[start:end], col, 'right')
+        return (col != indices[end-1]  # Not the last element
+                and searched != 0  # Not less than everything
+                and searched != (end-start))  # Not greater than everything
 
 
 class BaseModule(nn.Module):
@@ -129,20 +206,29 @@ class BaseModule(nn.Module):
         return self.forward(*args)
 
 
+def bpr_loss(preds, vals):
+    sig = nn.Sigmoid()
+    return (1.0 - sig(preds)).pow(2).sum()
+
+
 class BPRModule(BaseModule):
     
     def __init__(self,
                  n_users,
                  n_items,
                  n_factors=40,
-                 dropout_p=0):
+                 dropout_p=0,
+                 margin=1.0,
+                 loss_function=bpr_loss):
         super(BPRModule, self).__init__(
             n_users,
             n_items,
             n_factors=n_factors,
-            dropout_p=dropout_p
+            dropout_p=dropout_p,
+            loss_function=loss_function
         )
-        
+        self.margin = margin
+
     def forward(self, users, pos_items, neg_items):
         ues = self.user_embeddings(users)
         uis = self.item_embeddings(pos_items) - self.item_embeddings(neg_items)
@@ -173,15 +259,20 @@ class BasePipeline:
                  loss_function=nn.MSELoss(size_average=False),
                  n_epochs=10,
                  verbose=False,
-                 random_seed=None):
-        self.train_interactions = Interactions(train_data,
+                 random_seed=None,
+                 interaction_class=Interactions,
+                 hogwild=False,
+                 num_workers=0):
+        self.train_interactions = interaction_class(train_data,
                                                test_data=test_data,
                                                train=True)
+        self.num_workers = num_workers
         self.train_loader = data.DataLoader(
             self.train_interactions, batch_size=1024, shuffle=True,
+            num_workers=self.num_workers
         )
         if test_data is not None:
-            self.test_interactions = Interactions(train_data,
+            self.test_interactions = interaction_class(train_data,
                                                   test_data=test_data,
                                                   train=False)
             self.test_loader = data.DataLoader(
@@ -208,22 +299,33 @@ class BasePipeline:
         self.warm_start = False
         self.losses = collections.defaultdict(list)
         self.verbose = verbose
+        self.hogwild = hogwild
         if random_seed is not None:
+            if self.hogwild:
+                random_seed += os.getpid()
             torch.manual_seed(random_seed)
             np.random.seed(random_seed)
 
+    def break_grads(self):
+        for param in self.model.parameters():
+            # Break gradient sharing
+            if param.grad is not None:
+                param.grad.data = param.grad.data.clone()
+
     def fit(self):
-        for epoch in range(self.n_epochs):
-            self.losses['train'].append(self._fit_epoch())
-            row = 'Epoch: {0:^3} | {1:^10.5f} | '.format(epoch, self.losses['train'][-1])
+        if self.hogwild:
+            self.break_grads()
+        for epoch in range(1, self.n_epochs + 1):
+            self.losses['train'].append(self._fit_epoch(epoch))
+            row = 'Epoch: {0:^3}  train: {1:^10.5f}'.format(epoch, self.losses['train'][-1])
             if self.test_interactions is not None:
                 self.losses['test'].append(self._validation_loss())
-                row += '{0:^10.5f}'.format(self.losses['test'][-1])
+                row += 'val: {0:^10.5f}'.format(self.losses['test'][-1])
             self.losses['epoch'].append(epoch)
             if self.verbose:
                 print(row)
 
-    def _fit_epoch(self):
+    def _fit_epoch(self, epoch=1):
         self.model.train()
         total_loss = torch.Tensor([0])
         for batch_idx, ((row, col), val) in tqdm(enumerate(self.train_loader)):
@@ -249,5 +351,61 @@ class BasePipeline:
             preds = self.model(row, col)
             loss = self.model.loss_function(preds, val)
             total_loss += loss.data[0]
+        total_loss /= len(self.test_interactions)
+        return total_loss[0]
+
+
+class BPRPipeline(BasePipeline):
+    """
+    Class defining a training pipeline. Instantiates data loaders, model,
+    and optimizer. Handles training for multiple epochs and keeping track of
+    train and test loss.
+    """
+
+    def __init__(self,
+                 train_data,
+                 model=BPRModule,
+                 loss_function=bpr_loss,
+                 interaction_class=PairwiseInteractions,
+                 **kwargs):
+        super(BPRPipeline, self).__init__(
+            train_data, model=model, loss_function=loss_function,
+            interaction_class=interaction_class, **kwargs
+        )
+
+    def _fit_epoch(self, epoch=1):
+        self.model.train()
+        total_loss = torch.Tensor([0])
+        pbar = tqdm(enumerate(self.train_loader),
+                    total=len(self.train_loader),
+                    desc='Epoch: {}'.format(epoch))
+        for batch_idx, ((row, pos_col, neg_col), val) in pbar:
+            row = Variable(row)
+            pos_col = Variable(pos_col)
+            neg_col = Variable(neg_col)
+            val = Variable(val)
+            self.optimizer.zero_grad()
+            preds = self.model(row, pos_col, neg_col)
+            loss = self.model.loss_function(preds, val)
+            loss.backward()
+            self.optimizer.step()
+            total_loss += loss.data[0]
+            batch_loss = loss.data[0] / row.size()[0]
+            pbar.set_postfix(train_loss=batch_loss)
+        total_loss /= len(self.train_interactions)
+        return total_loss[0]
+
+    def _validation_loss(self):
+        self.model.eval()
+        total_loss = torch.Tensor([0])
+        for batch_idx, ((row, pos_col, neg_col), val) in enumerate(self.test_loader):
+            row = Variable(row)
+            pos_col = Variable(pos_col)
+            neg_col = Variable(neg_col)
+            val = Variable(val)
+            preds = self.model(row, pos_col, neg_col)
+            loss = self.model.loss_function(preds, val)
+            total_loss += loss.data[0]
+            batch_loss = loss.data[0] / row.size()[0]
         total_loss /= len(self.test_interactions)
         return total_loss[0]

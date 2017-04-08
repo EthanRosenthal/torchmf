@@ -4,6 +4,7 @@ import zipfile
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 
 """
 Shamelessly stolen from
@@ -78,3 +79,25 @@ def read_movielens_df():
     names = ['user_id', 'item_id', 'rating', 'timestamp']
     df = pd.read_csv(fname, sep='\t', names=names)
     return df
+
+
+def get_movielens_interactions():
+    df = read_movielens_df()
+
+    n_users = df.user_id.unique().shape[0]
+    n_items = df.item_id.unique().shape[0]
+
+    interactions = np.zeros((n_users, n_items))
+    for row in df.itertuples():
+        interactions[row[1] - 1, row[2] - 1] = row[3]
+    return interactions
+
+
+def get_movielens_train_test_split(implicit=False):
+    interactions = get_movielens_interactions()
+    if implicit:
+        interactions = (interactions >= 4).astype(np.float32)
+    train, test = train_test_split(interactions)
+    train = sp.coo_matrix(train)
+    test = sp.coo_matrix(test)
+    return train, test
