@@ -1,3 +1,4 @@
+import argparse
 import pickle
 import sys
 
@@ -47,12 +48,16 @@ def hogwild():
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == 'e':
+    parser = argparse.ArgumentParser(description='torchmf')
+    parser.add_argument('--example',
+                        help='explicit, implicit, or hogwild')
+    args = parser.parse_args()
+    if args.example == 'explicit':
         explicit()
-    elif sys.argv[1] == 'i':
+    elif args.example == 'implicit':
         implicit()
-    elif sys.argv[1] == 'h':
+    elif args.example == 'hogwild':
         hogwild()
     else:
-        print('input e or i')
+        print('example must be explicit, implicit, or hogwild')
 
