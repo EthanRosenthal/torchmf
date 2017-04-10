@@ -2,6 +2,7 @@ import collections
 import os
 
 import numpy as np
+from sklearn.metrics import roc_auc_score
 import torch
 import torch.autograd
 from torch.autograd import Variable
@@ -238,6 +239,15 @@ class BPRModule(BaseModule):
         preds += self.item_biases(pos_items) - self.item_biases(neg_items)
         return preds
 
+    def predict(self, users, items):
+        ues = self.user_embeddings(users)
+        uis = self.item_embeddings(items)
+        preds = (self.dropout(ues) * self.dropout(uis)).sum(1)
+
+        preds += self.user_biases(users)
+        preds += self.item_biases(items)
+        return preds
+
 
 class BasePipeline:
     """
@@ -402,15 +412,39 @@ class BPRPipeline(BasePipeline):
 
     def _validation_loss(self):
         self.model.eval()
-        total_loss = torch.Tensor([0])
-        for batch_idx, ((row, pos_col, neg_col), val) in enumerate(self.test_loader):
-            row = Variable(row)
-            pos_col = Variable(pos_col)
-            neg_col = Variable(neg_col)
-            val = Variable(val)
-            preds = self.model(row, pos_col, neg_col)
-            loss = self.model.loss_function(preds, val)
-            total_loss += loss.data[0]
-            batch_loss = loss.data[0] / row.size()[0]
-        total_loss /= len(self.test_interactions)
-        return total_loss[0]
+        return self.auc()
+        # total_loss = torch.Tensor([0])
+        # for batch_idx, ((row, pos_col, neg_col), val) in enumerate(self.test_loader):
+        #     row = Variable(row)
+        #     pos_col = Variable(pos_col)
+        #     neg_col = Variable(neg_col)
+        #     val = Variable(val)
+        #     preds = self.model(row, pos_col, neg_col)
+        #     loss = self.model.loss_function(preds, val)
+        #     total_loss += loss.data[0]
+        #     batch_loss = loss.data[0] / row.size()[0]
+        # total_loss /= len(self.test_interactions)
+        # return total_loss[0]
+
+    def auc(self):
+        self.model.eval()
+        aucs = []
+        items_init = torch.from_numpy(np.arange(self.n_items, dtype=np.long))
+        users_init = torch.ones(self.n_items).long()
+        for row in range(self.n_users):
+            users = Variable(users_init * np.long(row))
+            items = Variable(items_init)
+            preds = self.model.predict(users, items)
+
+            start = self.test_loader.dataset.test_indptr[row]
+            end = self.test_loader.dataset.test_indptr[row + 1]
+            actuals = self.test_loader.dataset.test_indices[start:end]
+
+            y_test = np.zeros(self.n_items)
+            y_test[actuals] = 1
+
+            aucs.append(roc_auc_score(y_test, preds.data.numpy()))
+        print(y_test)
+        print(preds)
+        return np.sum(aucs) / len(aucs)
+
