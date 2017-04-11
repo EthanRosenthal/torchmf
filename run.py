@@ -1,9 +1,5 @@
 import argparse
-import pickle
-import sys
 
-import numpy as np
-import scipy.sparse as sp
 import torch
 import torch.multiprocessing as mp
 
@@ -24,7 +20,7 @@ def explicit():
 def implicit():
     train, test = utils.get_movielens_train_test_split()
     pipeline = BPRPipeline(train, test_data=test, verbose=True,
-                           batch_size=64, num_workers=6,
+                           batch_size=64, num_workers=4,
                            n_factors=100, weight_decay=0,
                            dropout_p=0., lr=.1,
                            random_seed=2017)
@@ -34,7 +30,7 @@ def implicit():
 def hogwild():
     train, test = utils.get_movielens_train_test_split()
     pipeline = BPRPipeline(train, test_data=test, verbose=True,
-                           batch_size=2048, num_workers=1,
+                           batch_size=2048, num_workers=4,
                            random_seed=2017, hogwild=True)
 
     num_processes = 4
