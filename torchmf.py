@@ -125,9 +125,10 @@ class PairwiseInteractions(data.Dataset):
         start = indptr[row]
         end = indptr[row + 1]
         searched = np.searchsorted(indices[start:end], col, 'right')
-        return (col != indices[end-1]  # Not the last element
-                and searched != 0  # Not less than everything
-                and searched != (end-start))  # Not greater than everything
+        if searched >= (end - start):
+            # After the array
+            return False
+        return col != indices[searched]  # Not found
 
 
 class BaseModule(nn.Module):
@@ -161,6 +162,7 @@ class BaseModule(nn.Module):
         super(BaseModule, self).__init__()
         self.n_users = n_users
         self.n_items = n_items
+        self.n_factors = n_factors
         # We have to do everything as doubles because of this silly dataloader
         # stuff https://github.com/pytorch/pytorch/blob/master/torch/utils/data/dataloader.py#L72
         # Primary issue is that torch.from_numpy() seems to cast things from
@@ -198,7 +200,8 @@ class BaseModule(nn.Module):
         ues = self.user_embeddings(users)
         uis = self.item_embeddings(items)
 
-        preds = self.user_biases(users) + self.item_biases(items)
+        preds = self.user_biases(users)
+        preds += self.item_biases(items)
         preds += (self.dropout(ues) * self.dropout(uis)).sum(1)
 
         return preds
@@ -232,11 +235,13 @@ class BPRModule(BaseModule):
 
     def forward(self, users, pos_items, neg_items):
         ues = self.user_embeddings(users)
-        uis = self.item_embeddings(pos_items) - self.item_embeddings(neg_items)
+        uis = (self.item_embeddings(pos_items)
+               - self.item_embeddings(neg_items))
         preds = (self.dropout(ues) * self.dropout(uis)).sum(1)
 
         preds += self.user_biases(users)
-        preds += self.item_biases(pos_items) - self.item_biases(neg_items)
+        preds += self.item_biases(pos_items)
+        preds -= self.item_biases(neg_items)
         return preds
 
     def predict(self, users, items):
@@ -413,18 +418,6 @@ class BPRPipeline(BasePipeline):
     def _validation_loss(self):
         self.model.eval()
         return self.auc()
-        # total_loss = torch.Tensor([0])
-        # for batch_idx, ((row, pos_col, neg_col), val) in enumerate(self.test_loader):
-        #     row = Variable(row)
-        #     pos_col = Variable(pos_col)
-        #     neg_col = Variable(neg_col)
-        #     val = Variable(val)
-        #     preds = self.model(row, pos_col, neg_col)
-        #     loss = self.model.loss_function(preds, val)
-        #     total_loss += loss.data[0]
-        #     batch_loss = loss.data[0] / row.size()[0]
-        # total_loss /= len(self.test_interactions)
-        # return total_loss[0]
 
     def auc(self):
         self.model.eval()
@@ -440,11 +433,10 @@ class BPRPipeline(BasePipeline):
             end = self.test_loader.dataset.test_indptr[row + 1]
             actuals = self.test_loader.dataset.test_indices[start:end]
 
+            if len(actuals) == 0:
+                continue
             y_test = np.zeros(self.n_items)
             y_test[actuals] = 1
-
             aucs.append(roc_auc_score(y_test, preds.data.numpy()))
-        print(y_test)
-        print(preds)
         return np.sum(aucs) / len(aucs)
 
