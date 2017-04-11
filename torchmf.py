@@ -163,14 +163,10 @@ class BaseModule(nn.Module):
         self.n_users = n_users
         self.n_items = n_items
         self.n_factors = n_factors
-        # We have to do everything as doubles because of this silly dataloader
-        # stuff https://github.com/pytorch/pytorch/blob/master/torch/utils/data/dataloader.py#L72
-        # Primary issue is that torch.from_numpy() seems to cast things from
-        # float32 to Double, I think? Maybe I need a custom collate function?
-        self.user_biases = nn.Embedding(n_users, 1).double()
-        self.item_biases = nn.Embedding(n_items, 1).double()
-        self.user_embeddings = nn.Embedding(n_users, n_factors).double()
-        self.item_embeddings = nn.Embedding(n_items, n_factors).double()
+        self.user_biases = nn.Embedding(n_users, 1)
+        self.item_biases = nn.Embedding(n_items, 1)
+        self.user_embeddings = nn.Embedding(n_users, n_factors)
+        self.item_embeddings = nn.Embedding(n_items, n_factors)
         
         self.dropout_p = dropout_p
         self.dropout = nn.Dropout(p=self.dropout_p)
@@ -283,7 +279,7 @@ class BasePipeline:
                                                train=True)
         self.num_workers = num_workers
         self.train_loader = data.DataLoader(
-            self.train_interactions, batch_size=1024, shuffle=True,
+            self.train_interactions, batch_size=batch_size, shuffle=True,
             num_workers=self.num_workers
         )
         if test_data is not None:
@@ -291,7 +287,7 @@ class BasePipeline:
                                                   test_data=test_data,
                                                   train=False)
             self.test_loader = data.DataLoader(
-                self.test_interactions, batch_size=1024, shuffle=True,
+                self.test_interactions, batch_size=batch_size, shuffle=True,
             )
 
         self.n_users = train_data.shape[0]
@@ -349,7 +345,7 @@ class BasePipeline:
         for batch_idx, ((row, col), val) in pbar:
             row = Variable(row)
             col = Variable(col)
-            val = Variable(val)
+            val = Variable(val).float()
             self.optimizer.zero_grad()
             preds = self.model(row, col)
             loss = self.model.loss_function(preds, val)
@@ -367,7 +363,7 @@ class BasePipeline:
         for batch_idx, ((row, col), val) in enumerate(self.test_loader):
             row = Variable(row)
             col = Variable(col)
-            val = Variable(val)
+            val = Variable(val).float()
             preds = self.model(row, col)
             loss = self.model.loss_function(preds, val)
             total_loss += loss.data[0]
@@ -403,7 +399,7 @@ class BPRPipeline(BasePipeline):
             row = Variable(row)
             pos_col = Variable(pos_col)
             neg_col = Variable(neg_col)
-            val = Variable(val)
+            val = Variable(val).float()
             self.optimizer.zero_grad()
             preds = self.model(row, pos_col, neg_col)
             loss = self.model.loss_function(preds, val)
