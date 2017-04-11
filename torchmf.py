@@ -141,7 +141,8 @@ class BaseModule(nn.Module):
                  n_items,
                  n_factors=40,
                  dropout_p=0,
-                 loss_function=nn.MSELoss(size_average=False)):
+                 loss_function=nn.MSELoss(size_average=False),
+                 sparse=False):
         """
 
         Parameters
@@ -158,15 +159,19 @@ class BaseModule(nn.Module):
         loss_function
             Torch loss function. Not technically needed here, but it's nice
             to attach for later usage.
+        sparse : bool
+            Whether or not to treat embeddings as sparse. NOTE: cannot use
+            weight decay on the optimizer if sparse=True. Also, can only use
+            Adagrad.
         """
         super(BaseModule, self).__init__()
         self.n_users = n_users
         self.n_items = n_items
         self.n_factors = n_factors
-        self.user_biases = nn.Embedding(n_users, 1)
-        self.item_biases = nn.Embedding(n_items, 1)
-        self.user_embeddings = nn.Embedding(n_users, n_factors)
-        self.item_embeddings = nn.Embedding(n_items, n_factors)
+        self.user_biases = nn.Embedding(n_users, 1, sparse=sparse)
+        self.item_biases = nn.Embedding(n_items, 1, sparse=sparse)
+        self.user_embeddings = nn.Embedding(n_users, n_factors, sparse=sparse)
+        self.item_embeddings = nn.Embedding(n_items, n_factors, sparse=sparse)
         
         self.dropout_p = dropout_p
         self.dropout = nn.Dropout(p=self.dropout_p)
@@ -219,13 +224,15 @@ class BPRModule(BaseModule):
                  n_factors=40,
                  dropout_p=0,
                  margin=1.0,
-                 loss_function=bpr_loss):
+                 loss_function=bpr_loss,
+                 sparse=False):
         super(BPRModule, self).__init__(
             n_users,
             n_items,
             n_factors=n_factors,
             dropout_p=dropout_p,
-            loss_function=loss_function
+            loss_function=loss_function,
+            sparse=sparse
         )
         self.margin = margin
 
@@ -264,6 +271,7 @@ class BasePipeline:
                  n_factors=40,
                  batch_size=32,
                  dropout_p=0.02,
+                 sparse=False,
                  lr=0.01,
                  weight_decay=0.,
                  optimizer=torch.optim.Adam,
@@ -299,11 +307,14 @@ class BasePipeline:
         self.weight_decay = weight_decay
         self.loss_function = loss_function
         self.n_epochs = n_epochs
+        if sparse:
+            assert weight_decay == 0.0
         self.model = model(self.n_users,
                            self.n_items,
                            n_factors=self.n_factors,
                            dropout_p=self.dropout_p,
-                           loss_function=self.loss_function)
+                           loss_function=self.loss_function,
+                           sparse=sparse)
         self.optimizer = optimizer(self.model.parameters(),
                                    lr=self.lr,
                                    weight_decay=self.weight_decay)
