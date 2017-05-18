@@ -551,15 +551,6 @@ class BPRPipeline(BasePipeline):
         return np.mean(patks)
 
     def batch_patk(self, queue, rows, train=False):
-        """
-        Measure precision at k for model and ground truth.
-        Arguments:
-        - lightFM instance model
-        - sparse matrix ground_truth (no_users, no_items)
-        - int k
-        Returns:
-        - float precision@k
-        """
         items_init = torch.arange(0, self.n_items).long()
         users_init = torch.ones(self.n_items).long()
         for row in rows:
