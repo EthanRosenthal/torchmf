@@ -29,11 +29,12 @@ def train_test_split(interactions, n=10):
     test = np.zeros(interactions.shape)
     train = interactions.copy()
     for user in range(interactions.shape[0]):
-        test_interactions = np.random.choice(interactions[user, :].nonzero()[0],
-                                             size=n,
-                                             replace=False)
-        train[user, test_interactions] = 0.
-        test[user, test_interactions] = interactions[user, test_interactions]
+        if interactions[user, :].nonzero()[0].shape[0] > n:
+            test_interactions = np.random.choice(interactions[user, :].nonzero()[0],
+                                                 size=n,
+                                                 replace=False)
+            train[user, test_interactions] = 0.
+            test[user, test_interactions] = interactions[user, test_interactions]
 
     # Test and training are truly disjoint
     assert(np.all((train * test) == 0))
