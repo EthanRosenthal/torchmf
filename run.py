@@ -18,9 +18,7 @@ def explicit():
 
 
 def implicit():
-    # train, test = utils.get_movielens_train_test_split(implicit=True)
-
-    train, test, x, y, z = pickle.load(open('cache.p', 'rb'))
+    train, test = utils.get_movielens_train_test_split(implicit=True)
 
     pipeline = BPRPipeline(train, test=test, verbose=True,
                            batch_size=1024, num_workers=4,
@@ -33,8 +31,7 @@ def implicit():
 
 
 def hogwild():
-    # train, test = utils.get_movielens_train_test_split(implicit=True)
-    train, test, x, y, z = pickle.load(open('cache.p', 'rb'))
+    train, test = utils.get_movielens_train_test_split(implicit=True)
 
     pipeline = BPRPipeline(train, test=test, verbose=True,
                            batch_size=1024, num_workers=4,
