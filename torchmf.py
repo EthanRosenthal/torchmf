@@ -7,9 +7,15 @@ import torch
 import torch.autograd
 from torch.autograd import Variable
 from torch import nn
+import torch.multiprocessing as mp
 import torch.utils.data as data
 from tqdm import tqdm
 
+
+def flatten(l):
+    if isinstance(l[0], list):
+        return [y for x in l for y in x]
+    return l
 
 class Interactions(data.Dataset):
     """
@@ -20,38 +26,19 @@ class Interactions(data.Dataset):
     - Elements of the matrix are the ratings given by a user for an item.
     """
 
-    def __init__(self, train_data, test_data=None, train=True):
-        self.train = train
-        self.train_data = train_data.tocoo()
-        self.test_data = test_data.tocoo()
-        self.n_users = self.train_data.shape[0]
-        self.n_items = self.train_data.shape[1]
-
-        self.train_row = torch.from_numpy(self.train_data.row.astype(np.long))
-        self.train_col = torch.from_numpy(self.train_data.col.astype(np.long))
-        self.train_val = torch.from_numpy(self.train_data.data.astype(np.float32))
-
-        self.test_row = torch.from_numpy(self.test_data.row.astype(np.long))
-        self.test_col = torch.from_numpy(self.test_data.col.astype(np.long))
-        self.test_val = torch.from_numpy(self.test_data.data.astype(np.float32))
+    def __init__(self, mat):
+        self.mat = mat.astype(np.float32).tocoo()
+        self.n_users = self.mat.shape[0]
+        self.n_items = self.mat.shape[1]
 
     def __getitem__(self, index):
-        if self.train:
-            row = self.train_row[index]
-            col = self.train_col[index]
-            val = self.train_val[index]
-        else:
-            row = self.test_row[index]
-            col = self.test_col[index]
-            val = self.test_val[index]
-
+        row = self.mat.row[index]
+        col = self.mat.col[index]
+        val = self.mat.data[index]
         return (row, col), val
 
     def __len__(self):
-        if self.train:
-            return self.train_data.nnz
-        else:
-            return self.test_data.nnz
+        return self.mat.nnz
 
 
 class PairwiseInteractions(data.Dataset):
@@ -60,64 +47,34 @@ class PairwiseInteractions(data.Dataset):
     treated as the main dimension, and the columns are sampled pairwise.
     """
 
-    def __init__(self, train_data, test_data=None, train=True):
-        self.train = train
-        self.train_data = train_data.tocoo()
-        self.test_data = test_data.tocoo()
-        self.n_users = self.train_data.shape[0]
-        self.n_items = self.train_data.shape[1]
+    def __init__(self, mat):
+        self.mat = mat.astype(np.float32).tocoo()
 
-        self.train_row = torch.from_numpy(self.train_data.row.astype(np.long))
-        self.train_col = torch.from_numpy(self.train_data.col.astype(np.long))
-        self.train_val = torch.from_numpy(self.train_data.data.astype(np.float32))
+        self.n_users = self.mat.shape[0]
+        self.n_items = self.mat.shape[1]
 
-        train_csr = train_data.tocsr()
-        if not train_csr.has_sorted_indices:
-            train_csr.sort_indices()
-        self.train_indptr = train_csr.indptr
-        self.train_indices = train_csr.indices
-
-        self.test_row = torch.from_numpy(self.test_data.row.astype(np.long))
-        self.test_col = torch.from_numpy(self.test_data.col.astype(np.long))
-        self.test_val = torch.from_numpy(self.test_data.data.astype(np.float32))
-
-        test_csr = test_data.tocsr()
-        if not test_csr.has_sorted_indices:
-            test_csr.sort_indices()
-        self.test_indptr = test_csr.indptr
-        self.test_indices = test_csr.indices
+        self.mat_csr = self.mat.tocsr()
+        if not self.mat_csr.has_sorted_indices:
+            self.mat_csr.sort_indices()
 
     def __getitem__(self, index):
-        if self.train:
-            row = self.train_row[index]
-            found = False
-            while not found:
-                neg_col = np.random.randint(self.n_items)
-                if self.not_rated(row, neg_col, self.train_indptr,
-                                  self.train_indices):
-                    found = True
+        row = self.mat.row[index]
+        found = False
 
-            pos_col = self.train_col[index]
-            val = self.train_val[index]
-        else:
-            row = self.test_row[index]
-            found = False
-            while not found:
-                neg_col = np.random.randint(self.n_items)
-                if self.not_rated(row, neg_col, self.test_indptr,
-                                  self.test_indices):
-                    found = True
+        count = 0
+        while not found:
+            neg_col = np.random.randint(self.n_items)
+            if self.not_rated(row, neg_col, self.mat_csr.indptr,
+                              self.mat_csr.indices):
+                found = True
 
-            pos_col = self.test_col[index]
-            val = self.test_val[index]
+        pos_col = self.mat.col[index]
+        val = self.mat.data[index]
 
         return (row, pos_col, neg_col), val
 
     def __len__(self):
-        if self.train:
-            return self.train_data.nnz
-        else:
-            return self.test_data.nnz
+        return self.mat.nnz
 
     @staticmethod
     def not_rated(row, col, indptr, indices):
@@ -129,6 +86,11 @@ class PairwiseInteractions(data.Dataset):
             # After the array
             return False
         return col != indices[searched]  # Not found
+
+    def get_row_indices(self, row):
+        start = self.mat_csr.indptr[row]
+        end = self.mat_csr.indptr[row + 1]
+        return self.mat_csr.indices[start:end]
 
 
 class BaseModule(nn.Module):
@@ -210,10 +172,13 @@ class BaseModule(nn.Module):
     def __call__(self, *args):
         return self.forward(*args)
 
+    def predict(self, users, items):
+        return self.forward(users, items)
 
-def bpr_loss(preds, vals):
+
+def bpr_loss(pos_preds, neg_preds, vals):
     sig = nn.Sigmoid()
-    return (1.0 - sig(preds)).pow(2).sum()
+    return (1.0 - sig(pos_preds - neg_preds)).pow(2).sum()
 
 
 class BPRModule(BaseModule):
@@ -265,8 +230,8 @@ class BasePipeline:
     """
 
     def __init__(self,
-                 train_data,
-                 test_data=None,
+                 train,
+                 test=None,
                  model=BaseModule,
                  n_factors=40,
                  batch_size=32,
@@ -281,25 +246,26 @@ class BasePipeline:
                  random_seed=None,
                  interaction_class=Interactions,
                  hogwild=False,
-                 num_workers=0):
-        self.train_interactions = interaction_class(train_data,
-                                               test_data=test_data,
-                                               train=True)
-        self.num_workers = num_workers
-        self.train_loader = data.DataLoader(
-            self.train_interactions, batch_size=batch_size, shuffle=True,
-            num_workers=self.num_workers
-        )
-        if test_data is not None:
-            self.test_interactions = interaction_class(train_data,
-                                                  test_data=test_data,
-                                                  train=False)
-            self.test_loader = data.DataLoader(
-                self.test_interactions, batch_size=batch_size, shuffle=True,
-            )
+                 num_workers=0,
+                 eval_metrics=None,
+                 k=5):
+        self.train = train
+        self.test = test
 
-        self.n_users = train_data.shape[0]
-        self.n_items = train_data.shape[1]
+        if hogwild:
+            num_loader_workers = 0
+        else:
+            num_loader_workers = num_workers
+        self.train_loader = data.DataLoader(
+            interaction_class(train), batch_size=batch_size, shuffle=True,
+            num_workers=num_loader_workers)
+        if self.test is not None:
+            self.test_loader = data.DataLoader(
+                interaction_class(test), batch_size=batch_size, shuffle=True,
+                num_workers=num_loader_workers)
+        self.num_workers = num_workers
+        self.n_users = self.train.shape[0]
+        self.n_items = self.train.shape[1]
         self.n_factors = n_factors
         self.batch_size = batch_size
         self.dropout_p = dropout_p
@@ -328,6 +294,11 @@ class BasePipeline:
             torch.manual_seed(random_seed)
             np.random.seed(random_seed)
 
+        if eval_metrics is None:
+            eval_metrics = []
+        self.eval_metrics = eval_metrics
+        self.k = k
+
     def break_grads(self):
         for param in self.model.parameters():
             # Break gradient sharing
@@ -335,50 +306,96 @@ class BasePipeline:
                 param.grad.data = param.grad.data.clone()
 
     def fit(self):
-        if self.hogwild:
-            self.break_grads()
         for epoch in range(1, self.n_epochs + 1):
-            self.losses['train'].append(self._fit_epoch(epoch))
+
+            if self.hogwild:
+                self.model.share_memory()
+                processes = []
+                train_losses = []
+                queue = mp.Queue()
+                for rank in range(self.num_workers):
+                    p = mp.Process(target=self._fit_epoch,
+                                   kwargs={'epoch': epoch,
+                                           'queue': queue})
+                    p.start()
+                    processes.append(p)
+                for p in processes:
+                    p.join()
+
+                while True:
+                    is_alive = False
+                    for p in processes:
+                        if p.is_alive():
+                            is_alive = True
+                            break
+                    if not is_alive and queue.empty():
+                        break
+
+                    while not queue.empty():
+                        train_losses.append(queue.get())
+                queue.close()
+                train_loss = np.mean(train_losses)
+            else:
+                train_loss = self._fit_epoch(epoch)
+
+            self.losses['train'].append(train_loss)
             row = 'Epoch: {0:^3}  train: {1:^10.5f}'.format(epoch, self.losses['train'][-1])
-            if self.test_interactions is not None:
+            if self.test is not None:
                 self.losses['test'].append(self._validation_loss())
                 row += 'val: {0:^10.5f}'.format(self.losses['test'][-1])
+                for metric in self.eval_metrics:
+                    func = getattr(self, metric)
+                    res = func()
+                    self.losses['eval-{}'.format(metric)].append(res)
+                    row += 'eval-{0}: {1:^10.5f}'.format(metric, res)
             self.losses['epoch'].append(epoch)
             if self.verbose:
                 print(row)
 
-    def _fit_epoch(self, epoch=1):
+    def _fit_epoch(self, epoch=1, queue=None):
+        if self.hogwild:
+            self.break_grads()
+
         self.model.train()
         total_loss = torch.Tensor([0])
         pbar = tqdm(enumerate(self.train_loader),
                     total=len(self.train_loader),
                     desc='({0:^3})'.format(epoch))
         for batch_idx, ((row, col), val) in pbar:
-            row = Variable(row)
-            col = Variable(col)
-            val = Variable(val).float()
             self.optimizer.zero_grad()
+
+            row = Variable(row.long())
+            col = Variable(col.long())
+            val = Variable(val).float()
+
             preds = self.model(row, col)
             loss = self.model.loss_function(preds, val)
             loss.backward()
+
             self.optimizer.step()
+
             total_loss += loss.data[0]
             batch_loss = loss.data[0] / row.size()[0]
             pbar.set_postfix(train_loss=batch_loss)
-        total_loss /= len(self.train_interactions)
-        return total_loss[0]
+        total_loss /= self.train.nnz
+        if queue is not None:
+            queue.put(total_loss[0])
+        else:
+            return total_loss[0]
 
     def _validation_loss(self):
         self.model.eval()
         total_loss = torch.Tensor([0])
         for batch_idx, ((row, col), val) in enumerate(self.test_loader):
-            row = Variable(row)
-            col = Variable(col)
+            row = Variable(row.long())
+            col = Variable(col.long())
             val = Variable(val).float()
+
             preds = self.model(row, col)
             loss = self.model.loss_function(preds, val)
             total_loss += loss.data[0]
-        total_loss /= len(self.test_interactions)
+
+        total_loss /= self.test.nnz
         return total_loss[0]
 
 
@@ -390,60 +407,176 @@ class BPRPipeline(BasePipeline):
     """
 
     def __init__(self,
-                 train_data,
-                 model=BPRModule,
+                 train,
                  loss_function=bpr_loss,
                  interaction_class=PairwiseInteractions,
                  **kwargs):
         super(BPRPipeline, self).__init__(
-            train_data, model=model, loss_function=loss_function,
+            train, loss_function=loss_function,
             interaction_class=interaction_class, **kwargs
         )
 
-    def _fit_epoch(self, epoch=1):
-        self.model.train()
+    def _fit_epoch(self, epoch=1, queue=None):
+        if self.hogwild:
+            self.break_grads()
         total_loss = torch.Tensor([0])
         pbar = tqdm(enumerate(self.train_loader),
                     total=len(self.train_loader),
                     desc='({0:^3})'.format(epoch))
         for batch_idx, ((row, pos_col, neg_col), val) in pbar:
-            row = Variable(row)
-            pos_col = Variable(pos_col)
-            neg_col = Variable(neg_col)
+            row = Variable(row.long())
+            pos_col = Variable(pos_col.long())
+            neg_col = Variable(neg_col.long())
             val = Variable(val).float()
             self.optimizer.zero_grad()
-            preds = self.model(row, pos_col, neg_col)
-            loss = self.model.loss_function(preds, val)
+
+            pos_pred = self.model(row, pos_col)
+            neg_pred = self.model(row, neg_col)
+
+            loss = self.model.loss_function(pos_pred, neg_pred, val)
             loss.backward()
             self.optimizer.step()
             total_loss += loss.data[0]
             batch_loss = loss.data[0] / row.size()[0]
             pbar.set_postfix(train_loss=batch_loss)
-        total_loss /= len(self.train_interactions)
-        return total_loss[0]
+        total_loss /= self.train.nnz
+        if queue is not None:
+            queue.put(total_loss[0])
+        else:
+            return total_loss[0]
 
     def _validation_loss(self):
         self.model.eval()
-        return self.auc()
+        total_loss = torch.Tensor([0])
 
-    def auc(self):
+        for batch_idx, ((row, pos_col, neg_col), val) in enumerate(self.test_loader):
+            row = Variable(row.long())
+            pos_col = Variable(pos_col.long())
+            neg_col = Variable(neg_col.long())
+            val = Variable(val).float()
+
+            pos_pred = self.model(row, pos_col)
+            neg_pred = self.model(row, neg_col)
+
+            loss = self.model.loss_function(pos_pred, neg_pred, val)
+            total_loss += loss.data[0]
+        total_loss /= self.train.nnz
+        return total_loss[0]
+
+    def auc(self, train=False):
         self.model.eval()
         aucs = []
-        items_init = torch.from_numpy(np.arange(self.n_items, dtype=np.long))
+        processes = []
+        mp_batch = int(np.ceil(self.n_users / self.num_workers))
+        queue = mp.Queue()
+        rows = np.arange(self.n_users)
+        np.shuffle(rows)
+        for rank in range(self.num_workers):
+            start = rank * mp_batch
+            end = np.min((start + mp_batch,  self.n_users))
+            p = mp.Process(target=self.batch_auc,
+                           args=(queue, rows[start:end]),
+                           kwargs={'train': train})
+            p.start()
+            processes.append(p)
+
+        while True:
+            is_alive = False
+            for p in processes:
+                if p.is_alive():
+                    is_alive = True
+                    break
+            if not is_alive and queue.empty():
+                break
+
+            while not queue.empty():
+                aucs.append(queue.get())
+
+        queue.close()
+        for p in processes:
+            p.join()
+        return np.mean(aucs)
+
+    def batch_auc(self, queue, rows, train=False):
+        items_init = torch.arange(0, self.n_items).long()
         users_init = torch.ones(self.n_items).long()
-        for row in range(self.n_users):
-            users = Variable(users_init * np.long(row))
+        for row in rows:
+            users = Variable(users_init.fill_(row))
             items = Variable(items_init)
             preds = self.model.predict(users, items)
 
-            start = self.test_loader.dataset.test_indptr[row]
-            end = self.test_loader.dataset.test_indptr[row + 1]
-            actuals = self.test_loader.dataset.test_indices[start:end]
+            if train:
+                actuals = self.train_loader.dataset.get_row_indices(row)
+            else:
+                actuals = self.test_loader.dataset.get_row_indices(row)
 
             if len(actuals) == 0:
                 continue
             y_test = np.zeros(self.n_items)
             y_test[actuals] = 1
-            aucs.append(roc_auc_score(y_test, preds.data.numpy()))
-        return np.sum(aucs) / len(aucs)
+            queue.put(roc_auc_score(y_test, preds.data.numpy()))
 
+    def patk(self, train=False):
+        self.model.eval()
+        patks = []
+        processes = []
+        mp_batch = int(np.ceil(self.n_users / self.num_workers))
+        queue = mp.Queue()
+        rows = np.arange(self.n_users)
+        np.shuffle(rows)
+        for rank in range(self.num_workers):
+            start = rank * mp_batch
+            end = np.min((start + mp_batch, self.n_users))
+            p = mp.Process(target=self.batch_patk,
+                           args=(queue, rows[start:end]),
+                           kwargs={'train': train})
+            p.start()
+            processes.append(p)
+
+        while True:
+            is_alive = False
+            for p in processes:
+                if p.is_alive():
+                    is_alive = True
+                    break
+            if not is_alive and queue.empty():
+                break
+
+            while not queue.empty():
+                patks.append(queue.get())
+
+        queue.close()
+        for p in processes:
+            p.join()
+        return np.mean(patks)
+
+    def batch_patk(self, queue, rows, train=False):
+        """
+        Measure precision at k for model and ground truth.
+        Arguments:
+        - lightFM instance model
+        - sparse matrix ground_truth (no_users, no_items)
+        - int k
+        Returns:
+        - float precision@k
+        """
+        items_init = torch.arange(0, self.n_items).long()
+        users_init = torch.ones(self.n_items).long()
+        for row in rows:
+            users = Variable(users_init.fill_(row))
+            items = Variable(items_init)
+
+            preds = self.model.predict(users, items)
+            if train:
+                actuals = self.train_loader.dataset.get_row_indices(row)
+            else:
+                actuals = self.test_loader.dataset.get_row_indices(row)
+
+            if len(actuals) == 0:
+                continue
+
+            top_k = np.argpartition(-np.squeeze(preds.data.numpy()), self.k)
+            top_k = set(top_k[:self.k])
+            true_pids = set(actuals)
+            if true_pids:
+                queue.put(len(top_k & true_pids) / float(self.k))
