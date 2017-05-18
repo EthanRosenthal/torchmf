@@ -11,11 +11,22 @@ import torch.multiprocessing as mp
 import torch.utils.data as data
 from tqdm import tqdm
 
+import metrics
 
-def flatten(l):
-    if isinstance(l[0], list):
-        return [y for x in l for y in x]
-    return l
+
+# Models
+# Interactions Dataset => Singular Iter => Singular Loss
+# Pairwise Datasets => Pairwise Iter => Pairwise Loss
+# Pairwise Iters
+# Loss Functions
+# Optimizers
+# Metric callbacks
+
+# Serve up users, items (and items could be pos_items, neg_items)
+# In this case, the iteration remains the same. Pass both items into a model
+# which is a concat of the base model. it handles the pos and neg_items
+# accordingly. define the loss after.
+
 
 class Interactions(data.Dataset):
     """
@@ -61,7 +72,6 @@ class PairwiseInteractions(data.Dataset):
         row = self.mat.row[index]
         found = False
 
-        count = 0
         while not found:
             neg_col = np.random.randint(self.n_items)
             if self.not_rated(row, neg_col, self.mat_csr.indptr,
@@ -71,7 +81,7 @@ class PairwiseInteractions(data.Dataset):
         pos_col = self.mat.col[index]
         val = self.mat.data[index]
 
-        return (row, pos_col, neg_col), val
+        return (row, (pos_col, neg_col)), val
 
     def __len__(self):
         return self.mat.nnz
@@ -103,7 +113,6 @@ class BaseModule(nn.Module):
                  n_items,
                  n_factors=40,
                  dropout_p=0,
-                 loss_function=nn.MSELoss(size_average=False),
                  sparse=False):
         """
 
@@ -118,9 +127,6 @@ class BaseModule(nn.Module):
             call it).
         dropout_p : float
             p in nn.Dropout module. Probability of dropout.
-        loss_function
-            Torch loss function. Not technically needed here, but it's nice
-            to attach for later usage.
         sparse : bool
             Whether or not to treat embeddings as sparse. NOTE: cannot use
             weight decay on the optimizer if sparse=True. Also, can only use
@@ -138,7 +144,7 @@ class BaseModule(nn.Module):
         self.dropout_p = dropout_p
         self.dropout = nn.Dropout(p=self.dropout_p)
 
-        self.loss_function = loss_function
+        self.sparse = sparse
         
     def forward(self, users, items):
         """
@@ -176,50 +182,46 @@ class BaseModule(nn.Module):
         return self.forward(users, items)
 
 
-def bpr_loss(pos_preds, neg_preds, vals):
+def bpr_loss(preds, vals):
     sig = nn.Sigmoid()
-    return (1.0 - sig(pos_preds - neg_preds)).pow(2).sum()
+    return (1.0 - sig(preds)).pow(2).sum()
 
 
-class BPRModule(BaseModule):
+class BPRModule(nn.Module):
     
     def __init__(self,
                  n_users,
                  n_items,
                  n_factors=40,
                  dropout_p=0,
-                 margin=1.0,
-                 loss_function=bpr_loss,
-                 sparse=False):
-        super(BPRModule, self).__init__(
-            n_users,
-            n_items,
+                 sparse=False,
+                 model=BaseModule):
+        super(BPRModule, self).__init__()
+
+        self.n_users = n_users
+        self.n_items = n_items
+        self.n_factors = n_factors
+        self.dropout_p = dropout_p
+        self.sparse = sparse
+        self.pred_model = model(
+            self.n_users,
+            self.n_items,
             n_factors=n_factors,
             dropout_p=dropout_p,
-            loss_function=loss_function,
             sparse=sparse
         )
-        self.margin = margin
 
-    def forward(self, users, pos_items, neg_items):
-        ues = self.user_embeddings(users)
-        uis = (self.item_embeddings(pos_items)
-               - self.item_embeddings(neg_items))
-        preds = (self.dropout(ues) * self.dropout(uis)).sum(1)
-
-        preds += self.user_biases(users)
-        preds += self.item_biases(pos_items)
-        preds -= self.item_biases(neg_items)
-        return preds
+    def forward(self, users, items):
+        assert isinstance(items, tuple), \
+            'Must pass in items as (pos_items, neg_items)'
+        # Unpack
+        (pos_items, neg_items) = items
+        pos_preds = self.pred_model(users, pos_items)
+        neg_preds = self.pred_model(users, neg_items)
+        return pos_preds - neg_preds
 
     def predict(self, users, items):
-        ues = self.user_embeddings(users)
-        uis = self.item_embeddings(items)
-        preds = (self.dropout(ues) * self.dropout(uis)).sum(1)
-
-        preds += self.user_biases(users)
-        preds += self.item_biases(items)
-        return preds
+        return self.pred_model(users, items)
 
 
 class BasePipeline:
@@ -279,7 +281,6 @@ class BasePipeline:
                            self.n_items,
                            n_factors=self.n_factors,
                            dropout_p=self.dropout_p,
-                           loss_function=self.loss_function,
                            sparse=sparse)
         self.optimizer = optimizer(self.model.parameters(),
                                    lr=self.lr,
@@ -344,8 +345,9 @@ class BasePipeline:
                 self.losses['test'].append(self._validation_loss())
                 row += 'val: {0:^10.5f}'.format(self.losses['test'][-1])
                 for metric in self.eval_metrics:
-                    func = getattr(self, metric)
-                    res = func()
+                    func = getattr(metrics, metric)
+                    res = func(self.model, self.test_loader.dataset.mat_csr,
+                               num_workers=self.num_workers)
                     self.losses['eval-{}'.format(metric)].append(res)
                     row += 'eval-{0}: {1:^10.5f}'.format(metric, res)
             self.losses['epoch'].append(epoch)
@@ -365,11 +367,15 @@ class BasePipeline:
             self.optimizer.zero_grad()
 
             row = Variable(row.long())
-            col = Variable(col.long())
+            # TODO: turn this into a collate_fn like the data_loader
+            if isinstance(col, list):
+                col = tuple(Variable(c.long()) for c in col)
+            else:
+                col = Variable(col.long())
             val = Variable(val).float()
 
             preds = self.model(row, col)
-            loss = self.model.loss_function(preds, val)
+            loss = self.loss_function(preds, val)
             loss.backward()
 
             self.optimizer.step()
@@ -388,186 +394,15 @@ class BasePipeline:
         total_loss = torch.Tensor([0])
         for batch_idx, ((row, col), val) in enumerate(self.test_loader):
             row = Variable(row.long())
-            col = Variable(col.long())
+            if isinstance(col, list):
+                col = tuple(Variable(c.long()) for c in col)
+            else:
+                col = Variable(col.long())
             val = Variable(val).float()
 
             preds = self.model(row, col)
-            loss = self.model.loss_function(preds, val)
+            loss = self.loss_function(preds, val)
             total_loss += loss.data[0]
 
         total_loss /= self.test.nnz
         return total_loss[0]
-
-
-class BPRPipeline(BasePipeline):
-    """
-    Class defining a training pipeline. Instantiates data loaders, model,
-    and optimizer. Handles training for multiple epochs and keeping track of
-    train and test loss.
-    """
-
-    def __init__(self,
-                 train,
-                 loss_function=bpr_loss,
-                 interaction_class=PairwiseInteractions,
-                 **kwargs):
-        super(BPRPipeline, self).__init__(
-            train, loss_function=loss_function,
-            interaction_class=interaction_class, **kwargs
-        )
-
-    def _fit_epoch(self, epoch=1, queue=None):
-        if self.hogwild:
-            self.break_grads()
-        total_loss = torch.Tensor([0])
-        pbar = tqdm(enumerate(self.train_loader),
-                    total=len(self.train_loader),
-                    desc='({0:^3})'.format(epoch))
-        for batch_idx, ((row, pos_col, neg_col), val) in pbar:
-            row = Variable(row.long())
-            pos_col = Variable(pos_col.long())
-            neg_col = Variable(neg_col.long())
-            val = Variable(val).float()
-            self.optimizer.zero_grad()
-
-            pos_pred = self.model(row, pos_col)
-            neg_pred = self.model(row, neg_col)
-
-            loss = self.model.loss_function(pos_pred, neg_pred, val)
-            loss.backward()
-            self.optimizer.step()
-            total_loss += loss.data[0]
-            batch_loss = loss.data[0] / row.size()[0]
-            pbar.set_postfix(train_loss=batch_loss)
-        total_loss /= self.train.nnz
-        if queue is not None:
-            queue.put(total_loss[0])
-        else:
-            return total_loss[0]
-
-    def _validation_loss(self):
-        self.model.eval()
-        total_loss = torch.Tensor([0])
-
-        for batch_idx, ((row, pos_col, neg_col), val) in enumerate(self.test_loader):
-            row = Variable(row.long())
-            pos_col = Variable(pos_col.long())
-            neg_col = Variable(neg_col.long())
-            val = Variable(val).float()
-
-            pos_pred = self.model(row, pos_col)
-            neg_pred = self.model(row, neg_col)
-
-            loss = self.model.loss_function(pos_pred, neg_pred, val)
-            total_loss += loss.data[0]
-        total_loss /= self.train.nnz
-        return total_loss[0]
-
-    def auc(self, train=False):
-        self.model.eval()
-        aucs = []
-        processes = []
-        mp_batch = int(np.ceil(self.n_users / self.num_workers))
-        queue = mp.Queue()
-        rows = np.arange(self.n_users)
-        np.shuffle(rows)
-        for rank in range(self.num_workers):
-            start = rank * mp_batch
-            end = np.min((start + mp_batch,  self.n_users))
-            p = mp.Process(target=self.batch_auc,
-                           args=(queue, rows[start:end]),
-                           kwargs={'train': train})
-            p.start()
-            processes.append(p)
-
-        while True:
-            is_alive = False
-            for p in processes:
-                if p.is_alive():
-                    is_alive = True
-                    break
-            if not is_alive and queue.empty():
-                break
-
-            while not queue.empty():
-                aucs.append(queue.get())
-
-        queue.close()
-        for p in processes:
-            p.join()
-        return np.mean(aucs)
-
-    def batch_auc(self, queue, rows, train=False):
-        items_init = torch.arange(0, self.n_items).long()
-        users_init = torch.ones(self.n_items).long()
-        for row in rows:
-            users = Variable(users_init.fill_(row))
-            items = Variable(items_init)
-            preds = self.model.predict(users, items)
-
-            if train:
-                actuals = self.train_loader.dataset.get_row_indices(row)
-            else:
-                actuals = self.test_loader.dataset.get_row_indices(row)
-
-            if len(actuals) == 0:
-                continue
-            y_test = np.zeros(self.n_items)
-            y_test[actuals] = 1
-            queue.put(roc_auc_score(y_test, preds.data.numpy()))
-
-    def patk(self, train=False):
-        self.model.eval()
-        patks = []
-        processes = []
-        mp_batch = int(np.ceil(self.n_users / self.num_workers))
-        queue = mp.Queue()
-        rows = np.arange(self.n_users)
-        np.shuffle(rows)
-        for rank in range(self.num_workers):
-            start = rank * mp_batch
-            end = np.min((start + mp_batch, self.n_users))
-            p = mp.Process(target=self.batch_patk,
-                           args=(queue, rows[start:end]),
-                           kwargs={'train': train})
-            p.start()
-            processes.append(p)
-
-        while True:
-            is_alive = False
-            for p in processes:
-                if p.is_alive():
-                    is_alive = True
-                    break
-            if not is_alive and queue.empty():
-                break
-
-            while not queue.empty():
-                patks.append(queue.get())
-
-        queue.close()
-        for p in processes:
-            p.join()
-        return np.mean(patks)
-
-    def batch_patk(self, queue, rows, train=False):
-        items_init = torch.arange(0, self.n_items).long()
-        users_init = torch.ones(self.n_items).long()
-        for row in rows:
-            users = Variable(users_init.fill_(row))
-            items = Variable(items_init)
-
-            preds = self.model.predict(users, items)
-            if train:
-                actuals = self.train_loader.dataset.get_row_indices(row)
-            else:
-                actuals = self.test_loader.dataset.get_row_indices(row)
-
-            if len(actuals) == 0:
-                continue
-
-            top_k = np.argpartition(-np.squeeze(preds.data.numpy()), self.k)
-            top_k = set(top_k[:self.k])
-            true_pids = set(actuals)
-            if true_pids:
-                queue.put(len(top_k & true_pids) / float(self.k))
