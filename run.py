@@ -1,7 +1,7 @@
 import argparse
+import pickle
 
 import torch
-import torch.multiprocessing as mp
 
 from torchmf import BaseModule, BasePipeline, BPRPipeline
 import utils
@@ -9,7 +9,7 @@ import utils
 
 def explicit():
     train, test = utils.get_movielens_train_test_split()
-    pipeline = BasePipeline(train, test_data=test, model=BaseModule,
+    pipeline = BasePipeline(train, test=test, model=BaseModule,
                             n_factors=10, batch_size=1024, dropout_p=0.02,
                             lr=0.02, weight_decay=0.1,
                             optimizer=torch.optim.Adam, n_epochs=40,
@@ -18,31 +18,32 @@ def explicit():
 
 
 def implicit():
-    train, test = utils.get_movielens_train_test_split()
-    pipeline = BPRPipeline(train, test_data=test, verbose=True,
+    # train, test = utils.get_movielens_train_test_split(implicit=True)
+
+    train, test, x, y, z = pickle.load(open('cache.p', 'rb'))
+
+    pipeline = BPRPipeline(train, test=test, verbose=True,
                            batch_size=1024, num_workers=4,
-                           n_factors=100, weight_decay=0,
-                           dropout_p=0., lr=.1,
-                           random_seed=2017)
+                           n_factors=20, weight_decay=0,
+                           dropout_p=0., lr=.2, sparse=True,
+                           optimizer=torch.optim.SGD, n_epochs=40,
+                           random_seed=2017,
+                           eval_metrics=('auc', 'patk'))
     pipeline.fit()
 
 
 def hogwild():
-    train, test = utils.get_movielens_train_test_split()
-    pipeline = BPRPipeline(train, test_data=test, verbose=True,
-                           batch_size=2048, num_workers=1,
-                           random_seed=2017, hogwild=True)
+    # train, test = utils.get_movielens_train_test_split(implicit=True)
+    train, test, x, y, z = pickle.load(open('cache.p', 'rb'))
 
-    num_processes = 4
-    # NOTE: this is required for the ``fork`` method to work
-    pipeline.model.share_memory()
-    processes = []
-    for rank in range(num_processes):
-        p = mp.Process(target=pipeline.fit, )
-        p.start()
-        processes.append(p)
-    for p in processes:
-        p.join()
+    pipeline = BPRPipeline(train, test=test, verbose=True,
+                           batch_size=1024, num_workers=4,
+                           n_factors=20, weight_decay=0,
+                           dropout_p=0., lr=.2, sparse=True,
+                           optimizer=torch.optim.SGD, n_epochs=40,
+                           random_seed=2017, hogwild=True,
+                           eval_metrics=('auc', 'patk'))
+    pipeline.fit()
 
 
 if __name__ == '__main__':
