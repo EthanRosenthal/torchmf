@@ -2,14 +2,20 @@
 
 matrix factorization in PyTorch
 
-## Requirements
-python 3.5
+## Installation
 
-- pytorch
-- numpy
-- scipy
-- pandas
-- tqdm
+### pip
+
+```commandline
+pip install -r requirements.txt
+```
+
+### conda
+
+```commandline
+conda env create -f environment.yml
+conda activate torchmf
+```
 
 ## Example
 
