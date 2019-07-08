@@ -378,8 +378,8 @@ class BasePipeline:
 
             self.optimizer.step()
 
-            total_loss += loss.data[0]
-            batch_loss = loss.data[0] / row.size()[0]
+            total_loss += loss.item()
+            batch_loss = loss.item() / row.size()[0]
             pbar.set_postfix(train_loss=batch_loss)
         total_loss /= self.train.nnz
         if queue is not None:
@@ -391,16 +391,16 @@ class BasePipeline:
         self.model.eval()
         total_loss = torch.Tensor([0])
         for batch_idx, ((row, col), val) in enumerate(self.test_loader):
-            row = Variable(row.long())
+            row = row.long()
             if isinstance(col, list):
-                col = tuple(Variable(c.long()) for c in col)
+                col = tuple(c.long() for c in col)
             else:
-                col = Variable(col.long())
-            val = Variable(val).float()
+                col = col.long()
+            val = val.float()
 
             preds = self.model(row, col)
             loss = self.loss_function(preds, val)
-            total_loss += loss.data[0]
+            total_loss += loss.item()
 
         total_loss /= self.test.nnz
         return total_loss[0]
