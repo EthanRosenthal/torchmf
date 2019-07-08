@@ -2,8 +2,6 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from torch import multiprocessing as mp
 import torch
-import torch.autograd
-from torch.autograd import Variable
 
 
 def get_row_indices(row, interactions):
@@ -49,12 +47,11 @@ def auc(model, interactions, num_workers=1):
 
 def batch_auc(queue, rows, interactions, model):
     n_items = interactions.shape[1]
-    items_init = torch.arange(0, n_items).long()
+    items = torch.arange(0, n_items).long()
     users_init = torch.ones(n_items).long()
     for row in rows:
         row = int(row)
-        users = Variable(users_init.fill_(row))
-        items = Variable(items_init)
+        users = users_init.fill_(row)
 
         preds = model.predict(users, items)
         actuals = get_row_indices(row, interactions)
@@ -105,12 +102,11 @@ def patk(model, interactions, num_workers=1, k=5):
 def batch_patk(queue, rows, interactions, model, k=5):
     n_items = interactions.shape[1]
 
-    items_init = torch.arange(0, n_items).long()
+    items = torch.arange(0, n_items).long()
     users_init = torch.ones(n_items).long()
     for row in rows:
         row = int(row)
-        users = Variable(users_init.fill_(row))
-        items = Variable(items_init)
+        users = users_init.fill_(row)
 
         preds = model.predict(users, items)
         actuals = get_row_indices(row, interactions)

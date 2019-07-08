@@ -4,8 +4,6 @@ import os
 import numpy as np
 from sklearn.metrics import roc_auc_score
 import torch
-import torch.autograd
-from torch.autograd import Variable
 from torch import nn
 import torch.multiprocessing as mp
 import torch.utils.data as data
@@ -366,13 +364,13 @@ class BasePipeline:
         for batch_idx, ((row, col), val) in pbar:
             self.optimizer.zero_grad()
 
-            row = Variable(row.long())
+            row = row.long()
             # TODO: turn this into a collate_fn like the data_loader
             if isinstance(col, list):
-                col = tuple(Variable(c.long()) for c in col)
+                col = tuple(c.long() for c in col)
             else:
-                col = Variable(col.long())
-            val = Variable(val).float()
+                col = col.long()
+            val = val.float()
 
             preds = self.model(row, col)
             loss = self.loss_function(preds, val)
