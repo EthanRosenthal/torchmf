@@ -169,9 +169,9 @@ class BaseModule(nn.Module):
 
         preds = self.user_biases(users)
         preds += self.item_biases(items)
-        preds += (self.dropout(ues) * self.dropout(uis)).sum(1)
+        preds += (self.dropout(ues) * self.dropout(uis)).sum(dim=1, keepdim=True)
 
-        return preds
+        return preds.squeeze()
     
     def __call__(self, *args):
         return self.forward(*args)
