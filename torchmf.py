@@ -240,7 +240,7 @@ class BasePipeline:
                  lr=0.01,
                  weight_decay=0.,
                  optimizer=torch.optim.Adam,
-                 loss_function=nn.MSELoss(size_average=False),
+                 loss_function=nn.MSELoss(reduction='sum'),
                  n_epochs=10,
                  verbose=False,
                  random_seed=None,
